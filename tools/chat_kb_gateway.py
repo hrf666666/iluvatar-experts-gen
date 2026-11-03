@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""chat_kb_gateway.py — a hot-pluggable-knowledge-base front for llama-server (the Qwen3.8-27B path on
+Iluvatar, where the model is served by llama.cpp's own llama-server, not by the Strata engine).
+
+Clients talk to this gateway exactly as they would to llama-server's OpenAI API; the gateway retrieves
+from the plugged-in knowledge bases, writes the hits into the last user message (the same inject() the
+Strata server uses), and forwards the request. Replies - streamed or not - pass through untouched, so
+everything llama-server does (tools, JSON schemas, caching headers) keeps working.
+
+The knowledge bases are hot: load, unload, reload and swap at runtime on the same port, no restart of
+the gateway and none of llama-server. In-flight requests hold the KB snapshot they started with.
+
+    python3 tools/chat_kb_gateway.py --upstream http://127.0.0.1:8902 --port 8960 --kb-dir ./kb --kb handbook
+
+    # then, while it runs:
+    curl -s localhost:8960/v1/kbs -X POST -H 'Content-Type: application/json' \
+         -d '{"name": "freight", "source": "freight"}'
+    curl -s localhost:8960/v1/kbs/swap -X POST -H 'Content-Type: application/json' -d '{"active": ["freight"]}'
+    curl -s localhost:8960/v1/chat/completions -H 'Content-Type: application/json' -d \
+         '{"messages": [{"role": "user", "content": "顺丰多少钱"}], "max_tokens": 64}'
+"""
+
+import argparse
+import json
+import re
+import sys
+import urllib.error
+import urllib.request
+from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # the repo root, for serve.knowledge
+from serve.knowledge import KBRegistry, make_embedder          # the same registry the Strata server uses
+
+MAX_BODY = 10 * 1024 * 1024        # a request with images can be big; past this it is not a chat request
+
+
+# --------------------------------------------------------------------------- trained experts
+
+class ExpertHub:
+    """Hot-pluggable expert bundles produced by tools/expert_factory.py: an expert = a trained
+    router row + a graded expert card + the KB it fronts. `route` is the trained part — a
+    softmax over the question embedding, thresholded so off-domain requests fall through to
+    the plain KB path. The hub reuses the gateway's own KBRegistry (an expert's KB loads like
+    any other) and the same embedder, so a bundle trained against :8910 plugs in unchanged."""
+
+    def __init__(self, reg: KBRegistry, embedder):
+        self.reg, self.embedder = reg, embedder
+        self.experts: dict[str, dict] = {}          # name -> {bundle, W, b, classes}
+        self.active: tuple[str, ...] = ()
+        self.route_log: deque = deque(maxlen=50)
+
+    def load(self, expert_dir: Path) -> dict:
+        bundle = json.loads((expert_dir / "bundle.json").read_text(encoding="utf-8"))
+        name = bundle["name"]
+        z = np.load(expert_dir / "router.npz", allow_pickle=True)
+        self.experts[name] = {"bundle": bundle, "W": z["W"], "b": z["b"],
+                              "classes": [str(c) for c in z["classes"]]}
+        src = Path(bundle["source"])
+        kb_src = src.name if src.is_dir() else str(src)   # under the registry root by leaf name …
+        try:                                                # … or the absolute path when it moved
+            self.reg.load(name, src if src.exists() else kb_src)
+        except ValueError:
+            self.reg.load(name, kb_src)
+        return bundle
+
+    def swap(self, names) -> dict:
+        names = (names,) if isinstance(names, str) else tuple(names or ())
+        missing = [n for n in names if n not in self.experts]
+        if missing:
+            raise KeyError(", ".join(missing))
+        self.active = names
+        return self.list()
+
+    def unload(self, name: str) -> dict:
+        self.experts.pop(name, None)
+        self.active = tuple(n for n in self.active if n != name)
+        return self.list()
+
+    def route(self, question: str):
+        """-> (expert_name, prob, took) or (None, 0.0, False). Only ACTIVE experts are eligible;
+        their per-bundle thresholds gate the confidence. The decision is logged for /v1/experts."""
+        if not self.active or not question.strip():
+            return None, 0.0, False
+        q = self.embedder.embed([question])[0].astype(np.float32)
+        best, best_p = None, 0.0
+        for n in self.active:
+            ex = self.experts[n]
+            z = ex["W"].T @ q + ex["b"]
+            z = z - z.max()
+            e = np.exp(z)
+            p = e / e.sum()
+            i = int(p.argmax())
+            if ex["classes"][i] != n or n == "off-domain":
+                continue                    # the winner must be this expert's own class
+            if p[i] > best_p:
+                best, best_p = n, float(p[i])
+        if best is None:
+            return None, 0.0, False
+        took = best_p >= self.experts[best]["bundle"].get("threshold", 0.55)
+        self.route_log.append({"q": question[:80], "expert": best if took else None,
+                               "prob": round(best_p, 3)})
+        return (best, best_p, True) if took else (None, best_p, False)
+
+    def list(self) -> dict:
+        return {"active": list(self.active),
+                "experts": [{"name": n, "card_style": e["bundle"].get("card_style"),
+                             "threshold": e["bundle"].get("threshold"),
+                             "metrics": e["bundle"].get("metrics", {}).get("router", {})}
+                            for n, e in self.experts.items()]}
+
+
+def make_handler(upstream: str, reg: KBRegistry | None, hub: ExpertHub | None):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _reply(self, code, obj):
+            body = json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _body(self):
+            n = int(self.headers.get("Content-Length", 0))
+            if n > MAX_BODY:
+                raise ValueError("body too large")
+            req = json.loads(self.rfile.read(n) or b"{}")
+            if not isinstance(req, dict):
+                raise ValueError("send a JSON object")
+            return req
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            path = self.path.split("?")[0].rstrip("/")
+            if path == "/v1/kbs":
+                self._reply(200, reg.list() if reg else
+                            {"error": "started without --kb / --kb-dir; restart with --kb-dir to use "
+                                      "knowledge bases"})
+            elif path == "/v1/experts":
+                self._reply(200, hub.list() if hub else
+                            {"error": "started without --expert-dir; restart with it to use experts"})
+            elif path == "/v1/experts/route-log":
+                self._reply(200, {"recent": list(hub.route_log)} if hub else {"recent": []})
+            else:                                            # /health, /props, ...: ask the model server
+                self._forward("GET", None)
+
+        def do_DELETE(self):
+            path = self.path.split("?")[0].rstrip("/")
+            if hub and re.fullmatch(r"/v1/experts/[\w.-]+", path):
+                self._reply(200, hub.unload(path.split("/")[3]))
+                return
+            if reg is None:
+                self._reply(404, {"error": "started without --kb / --kb-dir"})
+                return
+            if not re.fullmatch(r"/v1/kbs/[\w.-]+", path):
+                self._reply(404, {"error": "not found"})
+                return
+            try:
+                self._reply(200, reg.unload(path.split("/")[3]))
+            except KeyError:
+                self._reply(404, {"error": f"unknown knowledge base: {path.split('/')[3]}"})
+
+        def do_POST(self):
+            path = self.path.split("?")[0].rstrip("/")
+            try:
+                if path == "/v1/chat/completions" and reg is not None:
+                    self._chat(self._body())
+                elif path == "/v1/kbs" and reg is not None:
+                    req = self._body()
+                    self._reply(200, reg.load(req["name"], req["source"],
+                                              req.get("chunk_size", 900), req.get("overlap", 140)))
+                elif path == "/v1/kbs/swap" and reg is not None:
+                    self._reply(200, reg.swap(self._body().get("active", "")))
+                elif re.fullmatch(r"/v1/kbs/[\w.-]+/reload", path) and reg is not None:
+                    self._reply(200, reg.reload(path.split("/")[3]))
+                elif re.fullmatch(r"/v1/kbs/[\w.-]+/search", path) and reg is not None:
+                    req = self._body()
+                    names = tuple(req["kb"]) if isinstance(req.get("kb"), list) else None
+                    self._reply(200, {"hits": reg.search(req["query"], names, req.get("top_k", 4))})
+                elif path == "/v1/experts" and hub is not None:
+                    req = self._body()
+                    d = Path(req["bundle_dir"] if "bundle_dir" in req else
+                             str(hub.expert_root / req["name"]))
+                    self._reply(200, hub.load(d))
+                elif path == "/v1/experts/swap" and hub is not None:
+                    self._reply(200, hub.swap(self._body().get("active", "")))
+                else:                                        # everything else: the model server's own API
+                    self._forward("POST", self._body())
+            except ValueError as e:
+                self._reply(400, {"error": str(e)})
+            except KeyError as e:
+                self._reply(404, {"error": f"unknown: {e.args[0]}"})
+            except OSError as e:
+                self._reply(400, {"error": f"expert bundle not readable: {e}"})
+
+        def _chat(self, req):
+            """Retrieve with the last user message, inject, forward. "kb" picks the KBs ("auto"/left
+            out: the active set; false: none); it and "kb_top_k" are ours and are stripped before
+            forwarding. With experts active and no explicit "kb"/"expert", the TRAINED router picks
+            the expert: its card fronts the model as the system persona and its KB is the retrieval
+            set; below the confidence threshold the request falls through to the plain KB path."""
+            messages = req.get("messages")
+            if not isinstance(messages, list):
+                raise ValueError("messages: a list of chat messages")
+            body = {k: v for k, v in req.items() if k not in ("kb", "kb_top_k", "expert")}
+            last_user_text = next((m.get("content") if isinstance(m.get("content"), str) else
+                                   "".join(p.get("text", "") for p in m.get("content", [])
+                                           if isinstance(p, dict) and p.get("type") == "text")
+                                   for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), "")
+            expert = None
+            if hub is not None:
+                want = req.get("expert", "auto")
+                if want is False:
+                    pass                                       # explicitly off
+                elif isinstance(want, str) and want not in ("", "auto"):
+                    if want not in hub.experts:
+                        raise ValueError(f"unknown expert: {want}")
+                    expert = want
+                elif hub.active and "kb" not in req:            # nothing asked: let the head decide
+                    name, _p, took = hub.route(last_user_text)
+                    if took:
+                        expert = name
+            names = reg.resolve(req.get("kb")) if expert is None else (expert,)
+            if names is None:
+                names = reg.snapshot_names()
+            if expert is not None:
+                card = hub.experts[expert]["bundle"]["card"]
+                first = messages[0] if messages else None
+                if isinstance(first, dict) and first.get("role") == "system":
+                    first["content"] = f"{card}\n\n{first.get('content') or ''}"
+                else:
+                    messages.insert(0, {"role": "system", "content": card})
+            if names:
+                top_k = req.get("kb_top_k", 4)
+                if not isinstance(top_k, int) or isinstance(top_k, bool) or not 1 <= top_k <= 32:
+                    raise ValueError("kb_top_k: a whole number from 1 to 32")
+                try:
+                    hits = reg.search(
+                        next((m.get("content") if isinstance(m.get("content"), str) else
+                              "".join(p.get("text", "") for p in m.get("content", [])
+                                      if isinstance(p, dict) and p.get("type") == "text")
+                              for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), ""),
+                        names, top_k)
+                except KeyError as e:                        # a chat request naming a missing KB: a 400, as the
+                    raise ValueError(f"unknown knowledge base: {e.args[0]}") from None   # Strata server says it
+                if hits:
+                    block = "\n".join(f"[knowledge base {h['kb']} #{i + 1} | source: {h['source']}]\n{h['text']}"
+                                      for i, h in enumerate(hits))
+                    last = next(m for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user")
+                    if isinstance(last.get("content"), list):
+                        last["content"] = [{"type": "text",
+                                            "text": f"[knowledge base context]\n{block}\n"
+                                                    f"[end of knowledge base context]"}] + list(last["content"])
+                        for p in last["content"][1:]:        # llama-server takes OpenAI parts, not the template's
+                            p.pop("source", None)
+                    else:
+                        last["content"] = (f"[knowledge base context]\n{block}\n[end of knowledge base context]"
+                                           f"\n\n{last.get('content') or ''}")
+            self._forward("POST", body)
+
+        def _forward(self, method, body):
+            """One hop to the model server; an SSE reply is piped through as it arrives."""
+            data = json.dumps(body).encode() if body is not None else None
+            headers = {"Content-Type": "application/json"} if data is not None else {}
+            req = urllib.request.Request(upstream + self.path, data=data, headers=headers, method=method)
+            try:
+                r = urllib.request.urlopen(req, timeout=600)
+            except urllib.error.HTTPError as e:
+                self._reply(e.code, {"error": {"message": e.read().decode("utf-8", "replace")[:4000]}})
+                return
+            except OSError as e:
+                self._reply(502, {"error": {"message": f"the model server at {upstream} is not answering: {e}"}})
+                return
+            with r:
+                self.send_response(r.status)
+                stream = (r.headers.get("Content-Type", "").startswith("text/event-stream"))
+                if not stream:
+                    self.send_header("Content-Length", r.headers.get("Content-Length", ""))
+                for h in ("Content-Type", "Cache-Control"):
+                    if r.headers.get(h):
+                        self.send_header(h, r.headers[h])
+                self.end_headers()
+                try:
+                    while True:                             # small chunks: the first token stays early
+                        chunk = r.read(1024 if stream else 65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        if stream:
+                            self.wfile.flush()
+                except OSError:
+                    pass                                     # the client went away; the model server keeps going
+
+    return Handler
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--upstream", required=True, help="the llama-server base URL, e.g. http://127.0.0.1:8902")
+    ap.add_argument("--port", type=int, default=8960)
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--kb", action="append", default=[], metavar="NAME",
+                    help="start with these knowledge bases active (source: --kb-dir/NAME); repeatable")
+    ap.add_argument("--kb-dir", help="the root knowledge bases load from (and must stay inside)")
+    ap.add_argument("--kb-embedder", default="lexical", metavar="SPEC",
+                    help='"lexical" (the default) or "llama:http://host:port" (a llama-server with --embedding)')
+    ap.add_argument("--expert-dir", metavar="DIR",
+                    help="expert bundles from tools/expert_factory.py; hot at /v1/experts (needs --kb-dir)")
+    ap.add_argument("--expert", action="append", default=[], metavar="NAME",
+                    help="start with these trained experts active (bundle: --expert-dir/NAME)")
+    args = ap.parse_args()
+
+    reg = None
+    hub = None
+    if args.kb or args.kb_dir:
+        try:
+            reg = KBRegistry(embedder=make_embedder(args.kb_embedder), root=args.kb_dir or ".")
+            for name in args.kb:
+                reg.load(name, name)
+            reg.swap(args.kb)
+        except ValueError as e:
+            raise SystemExit(f"knowledge base: {e}")
+    if args.expert_dir and reg is None:
+        raise SystemExit("--expert-dir needs --kb-dir (an expert fronts a knowledge base)")
+    if args.expert_dir:
+        root = Path(args.expert_dir)
+        hub = ExpertHub(reg, reg.embedder)
+        hub.expert_root = root
+        try:
+            for name in args.expert:
+                hub.load(root / name)
+            hub.swap(args.expert)
+        except (ValueError, KeyError, OSError) as e:
+            raise SystemExit(f"expert: {e}")
+
+    print(f"chat kb gateway on http://{args.host}:{args.port} -> {args.upstream}"
+          + (f" | knowledge bases: {', '.join(args.kb) or 'none active'} (hot: /v1/kbs)" if reg else "")
+          + (f" | experts: {', '.join(args.expert) or 'none active'} (hot: /v1/experts)" if hub else ""),
+          file=sys.stderr, flush=True)
+    ThreadingHTTPServer((args.host, args.port), make_handler(args.upstream.rstrip("/"), reg, hub)).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

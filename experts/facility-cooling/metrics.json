@@ -1,0 +1,22 @@
+{
+  "chunks": 12,
+  "qa_total": 11,
+  "heldout": 2,
+  "router": {
+    "classes": [
+      "facility-cooling",
+      "off-domain"
+    ],
+    "train_acc": 1.0,
+    "heldout_acc": 1.0,
+    "threshold": 0.35,
+    "iters": 400
+  },
+  "cards": {
+    "policy": 1.0,
+    "guide": 1.0
+  },
+  "retrieval_only_baseline": 1.0,
+  "shipped_card": "policy",
+  "build_seconds": 148.1
+}

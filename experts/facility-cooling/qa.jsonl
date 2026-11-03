@@ -1,0 +1,11 @@
+{"question": "该细则的文档名称是什么？", "answer": "机房风侧与环境运维细则(虚构演示域 v1)", "source": "air-side.md", "chunk": 0, "split": "train"}
+{"question": "机房冷通道温度告警阈值是多少？", "answer": "27 摄氏度", "source": "air-side.md", "chunk": 1, "split": "test"}
+{"question": "精密空调 N+1 冗余机组的轮值保养时间及保养期间冗余机组的状态要求是什么？", "answer": "每月第一周周六轮值保养，保养期间冗余机组必须处于自动待机状态。", "source": "air-side.md", "chunk": 2, "split": "train"}
+{"question": "地板下送风通道多久清理一次？发现线缆阻挡送风口超过30%面积时应如何处理？", "answer": "每季度清理一次；当班内恢复并拍照留档。", "source": "air-side.md", "chunk": 4, "split": "train"}
+{"question": "漏水检测绳的校验频率、整段更换条件及工单归属部门是什么？", "answer": "每年校验一次灵敏度，误报两次以上的区段整段更换，工单归设施二组。", "source": "air-side.md", "chunk": 5, "split": "train"}
+{"question": "该运维规程的文档名称是什么？", "answer": "数据中心一次侧液冷回路运维规程(虚构演示域 v1)", "source": "liquid-loop.md", "chunk": 6, "split": "train"}
+{"question": "一次侧液冷回路主备泵切换前需确认板式换热器进出口压差低于多少？", "answer": "0.12 MPa", "source": "liquid-loop.md", "chunk": 7, "split": "test"}
+{"question": "冷却液取样化验不合格后的处理期限及执行要求是什么？", "answer": "需在7天内完成补液调整，由持证操作员双人执行。", "source": "liquid-loop.md", "chunk": 8, "split": "train"}
+{"question": "CDU 出水温度夏季和冬季的设定值分别是多少？", "answer": "夏季为 23 摄氏度、冬季为 21 摄氏度。", "source": "liquid-loop.md", "chunk": 9, "split": "train"}
+{"question": "漏液告警触发后10分钟内必须做什么？确认为主管路泄漏后需执行哪些操作？", "answer": "10分钟内必须到场定位；确认为主管路泄漏的，立即执行冷源降载预案并将漏液区域机柜功率降至50%，同时通知IT运行组迁移关键业务。", "source": "liquid-loop.md", "chunk": 10, "split": "train"}
+{"question": "蓄冷罐满载工况下系统供冷不间断时间要求是多少？", "answer": "不低于 20 分钟", "source": "liquid-loop.md", "chunk": 11, "split": "train"}

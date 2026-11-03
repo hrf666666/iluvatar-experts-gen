@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# ivcc — CoreX clang CUDA-compiler wrapper for CMake CUDA language (GGML_CUDA).
+# v2 (2026-10-10): force -O1 instead of -O0.
+#   -O0 leaves CoreX's `static __inline__` device fp16 helpers un-inlined;
+#   the resulting RPCMOV/PCSWAP device-call sequences raise XID-22 illegal
+#   instruction interrupts on BI-V150 and permanently wedge the GPU channel.
+#   -O1 inlines them (SASS verified: zero call sequences, native F2F.F16
+#   conversions) and avoids the -O3 llc optimizer crashes.
+#   Drop incoming -O* flags; -O1 as the LAST flag wins.
+COREX=/usr/local/corex-4.4.0
+REAL=$COREX/bin/clang++
+COMPAT=/usr/local/bin/corex_compat.h
+
+args=()
+has_c=0
+for a in "$@"; do
+  case "$a" in
+    *.cu|*.cpp|*.cc|*.c|*.cxx) args+=("$a") ;;
+    -c)                        has_c=1; args+=("$a") ;;
+    -x\ cuda)                  args+=(-x ivcore) ;;
+    -O*)                       ;;
+    --cuda-gpu-arch=*)         ;;
+    --generate-code*|-gencode*|-arch=*) ;;
+    -extended-lambda|--extended-lambda|--expt-*-lambda|-use_fast_math|--use_fast_math) ;;
+    *)                         args+=("$a") ;;
+  esac
+done
+
+# v3 (2026-10-16): the ggml-cuda MMQ objects abort llc ("BI annotate control flow" pass,
+# core dump) at -O1 on this llc build; compile them at -O0. Safe: with STRATA_PREFILL_MMQ
+# defaulting OFF under STRATA_EXPERIMENTAL_SM60 (see prefill.cpp) these kernels never launch,
+# so the -O0 un-inlined-helper XID-22 hazard cannot fire.
+# v4 (2026-11-02, on the 4413a19 tree): the v3 "*ggml-cuda*" glob matched EVERY CUDA
+# object's path (CMake puts them all under ggml-cuda/), so the whole backend built at
+# -O0 and the non-inlined fp16 helpers (ptr addrspace(5)) failed with "invalid
+# addrspacecast" in cpy/convert/getrows/mmvf/lightning/mmvq/ssm-scan before llc ran.
+# Match the SOURCE FILE name instead, only for the quant matmul units of the v3 note;
+# everything else stays at -O1 (corex_compat.h: -O1 required, -O0 device calls wedge
+# the card with XID-22).
+for a in "$@"; do
+  case "$a" in
+    XXX_NEVER_MATCH_XXX) OPT=-O0; break ;;
+  esac
+done
+OPT=${OPT:--O1}
+# v6 (2026-11-02, CoreX 5.0.0 image): 5.0 headers natively provide scalar __ldcs,
+# the driver-entry-point query types and the batched-memcpy struct that
+# corex_compat.h shimmed for 4.4 — the shims now collide (redefinitions).
+# mapping_cudart.h gained "#define cudaMemcpyAttributes ixMemcpyAttributes"
+# only in 5.0, so its presence marks the new toolkit; flag it for the header.
+EXTRA=()
+grep -q 'define cudaMemcpyAttributes ixMemcpyAttributes' $COREX/include/IX/mapping_cudart.h 2>/dev/null && EXTRA+=(-DCOREX_GE_50=1)
+cmd=(nice -n 5 "$REAL" -std=c++17 -DGGML_CUDA_ARCH_NUM=710 \
+     -include "$COMPAT" \
+     --cuda-gpu-arch=ivcore11 --cuda-path=$COREX --no-cuda-version-check \
+     -I$COREX/include "${args[@]}" ${OPT} "${EXTRA[@]}")
+
+if [ $has_c -eq 0 ]; then
+  cmd+=(-L$COREX/lib64 -Wl,-rpath,$COREX/lib64 -L/usr/local/iluvatar/lib64 -Wl,-rpath,/usr/local/iluvatar/lib64 -lcudart -lcublas -lcurand -lixml)
+  # CoreX 5.0 ships libcuda.so.1 without the dev symlink; 4.4 had -lcuda work.
+  [ -e $COREX/lib64/libcuda.so ] && cmd+=(-lcuda) || cmd+=(-l:libcuda.so.1)
+  # v5 (2026-11-02, CoreX 5.0.0 image): 5.0 drops libixthunk.so entirely; 4.4-built
+  # binaries prove nothing calls into it (ldd -r: zero unresolved symbols with an
+  # empty stub). Link it only when the toolkit actually ships it.
+  [ -e $COREX/lib64/libixthunk.so ] && cmd+=(-lixthunk)
+fi
+
+exec "${cmd[@]}"

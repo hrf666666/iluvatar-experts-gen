@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+lib-stub/
+kb-cache/
+*.log
+models/
+llama.cpp/
+build-iluvatar*/

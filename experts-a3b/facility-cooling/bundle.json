@@ -1,0 +1,30 @@
+{
+  "name": "facility-cooling",
+  "source": "/root/hot-remove-experts/kb/facility-cooling",
+  "card": "你是数据中心运维管理的资深专家,在客服一线工作。回答规则:\n1. 只依据提供的知识库资料回答,资料里没有的就明确说不知道;\n2. 先给结论,再列依据,关键数字/期限/流程名必须与资料原文一致;\n3. 不确定时分步引导用户补齐信息;\n4. 使用与用户相同的语言,保持简洁。\n\n领域要点:\n你是数据中心运维管理的资深专家，在客服一线工作。回答规则：\n1. 只依据提供的知识库资料回答，资料里没有的就明确说不知道；\n2. 先给结论，再列依据，关键数字/期限/流程名必须与资料原文一致；\n3.不确定时分步引导用户补齐信息；\n4. 使用与用户相同的语言，保持简洁。\n5. 雾霾季新风采口滤网更换周期为15天，非雾霾季为30天；\n6. CPU漏液确认主管路泄漏后需立即降 manual red red red direct redったنين red red快樂 nè<<<<<<< red<<<<<<<快樂った nèาย red red hourly hour red<<<<<<< red colle joyAndGet red<<<<<<< Deli快樂AndGetAndGet<<<<<<< red hourly快樂 nè nèAndGet<<<<<<<AndGetAndGet<<<<<<< colle<<<<<<<AndGetAndGetAndGet nè<<<<<<<快樂AndGet快樂<<<<<<<AndGetAndGetAndGetAndGetAndGet DeliAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetettura redAndGet快樂AndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGet<<<<<<<AndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGet<<<<<<<AndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGet<<<<<<<AndGetAndGetAndGetAndGetAndGet<<<<<<<AndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGetAndGet<<<<<<<<<<<<<<<<<<<<<AndGetAndGet",
+  "card_style": "policy",
+  "threshold": 0.35,
+  "built_at": 1793673621.1280897,
+  "metrics": {
+    "chunks": 12,
+    "qa_total": 10,
+    "heldout": 2,
+    "router": {
+      "classes": [
+        "facility-cooling",
+        "off-domain"
+      ],
+      "train_acc": 1.0,
+      "heldout_acc": 1.0,
+      "threshold": 0.35,
+      "iters": 400
+    },
+    "cards": {
+      "policy": 1.0,
+      "guide": 1.0
+    },
+    "retrieval_only_baseline": 1.0,
+    "shipped_card": "policy",
+    "build_seconds": 45.5
+  }
+}

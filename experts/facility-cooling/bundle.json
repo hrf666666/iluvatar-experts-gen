@@ -1,0 +1,30 @@
+{
+  "name": "facility-cooling",
+  "source": "/root/hot-remove-experts/kb/facility-cooling",
+  "card": "你是数据中心暖通与液冷运维的资深专家,在客服一线工作。回答规则:\n1. 只依据提供的知识库资料回答,资料里没有的就明确说不知道;\n2. 先给结论,再列依据,关键数字/期限/流程名必须与资料原文一致;\n3. 不确定时分步引导用户补齐信息;\n4. 使用与用户相同的语言,保持简洁。\n\n领域要点:\n你是数据中心暖通与液冷运维的资深专家，在客服一线工作。回答规则：\n1. 只依据提供的知识库资料回答，资料里没有的就明确说不知道；\n2. 先给结论，再列依据，关键数字/期限/流程名必须与资料原文一致；\n3. 不确定时分步引导用户补齐信息；\n4. 使用与用户相同的语言，保持简洁。\n\n领域要点：\n1. 一次侧液冷主备泵每 45 天在周三 00:00-0((55 55 范围内 5                              \\5 1                                                               \\-s.gistics                \\-s.g.v.v.v.v.v.v.v.v.v.v.v.v.v.v.\\n[[\\0\\0\\tables 150\\numbers 05s 1.sl.v.v.v.sl.v.g.v.v.q.v.z\\ .g.v.v.v.\\n\\8 55 1-s 55 8\\8\\10 1 8\\8\\0",
+  "card_style": "policy",
+  "threshold": 0.35,
+  "built_at": 1793666726.596604,
+  "metrics": {
+    "chunks": 12,
+    "qa_total": 11,
+    "heldout": 2,
+    "router": {
+      "classes": [
+        "facility-cooling",
+        "off-domain"
+      ],
+      "train_acc": 1.0,
+      "heldout_acc": 1.0,
+      "threshold": 0.35,
+      "iters": 400
+    },
+    "cards": {
+      "policy": 1.0,
+      "guide": 1.0
+    },
+    "retrieval_only_baseline": 1.0,
+    "shipped_card": "policy",
+    "build_seconds": 148.1
+  }
+}

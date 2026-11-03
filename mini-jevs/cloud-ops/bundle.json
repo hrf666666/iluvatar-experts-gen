@@ -1,0 +1,25 @@
+{
+  "domain": "cloud-ops",
+  "anchors": {
+    "gpu-node": "gpu-node: 处置XID22/OOM/掉卡，隔离故障卡并重启节点",
+    "scheduler": "scheduler: 按85%配额调度，推理池1.1倍超卖，禁止大模型同卡",
+    "network": "network: 排查NCCL通信假死，保障多卡张量并行带宽",
+    "billing": "billing: 依据显存配额与优先级，核算GPU资源成本"
+  },
+  "options": [
+    "gpu-node",
+    "scheduler",
+    "network",
+    "billing"
+  ],
+  "kb": "cloud-ops",
+  "rank": 64,
+  "temperature": 4.0,
+  "cases": 13,
+  "agreement": {
+    "train": 1.0,
+    "holdout": 0.667
+  },
+  "built_at": 1793681646.8348227,
+  "build_seconds": 418.4
+}

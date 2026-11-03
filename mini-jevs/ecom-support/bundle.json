@@ -1,0 +1,25 @@
+{
+  "domain": "ecom-support",
+  "anchors": {
+    "billing": "billing: 处理重复扣款及退款时效问题，核实后1-3个工作日原路退回。",
+    "shipping": "shipping: 处理地址修改、拦截及破损丢件，24小时内凭证，72小时内补发或退款。",
+    "technical support": "technical support: 处理APP闪退、支付失败及订单状态异常，复现后2个工作日内出方案。",
+    "account security": "account security: 处理盗号及异常登录，立即冻结账号24小时并触发异地登录核查。"
+  },
+  "options": [
+    "billing",
+    "shipping",
+    "technical support",
+    "account security"
+  ],
+  "kb": "ecom-support",
+  "rank": 64,
+  "temperature": 4.0,
+  "cases": 24,
+  "agreement": {
+    "train": 1.0,
+    "holdout": 0.667
+  },
+  "built_at": 1793681220.9219582,
+  "build_seconds": 269.1
+}

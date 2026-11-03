@@ -1,0 +1,10 @@
+{"question": "这份文档的标题是什么？", "answer": "机房风侧与环境运维细则(虚构演示域 v1)", "source": "air-side.md", "chunk": 0, "split": "train"}
+{"question": "机房冷通道温度告警阈值是多少？", "answer": "27 摄氏度", "source": "air-side.md", "chunk": 1, "split": "test"}
+{"question": "精密空调 N+1 冗余机组的轮值保养时间是什么时候？", "answer": "每月第一周周六", "source": "air-side.md", "chunk": 2, "split": "train"}
+{"question": "新风采口滤网在雾霾季多久更换一次？", "answer": "15 天", "source": "air-side.md", "chunk": 3, "split": "train"}
+{"question": "漏水检测绳灵敏度校验周期是多久？", "answer": "每年一次", "source": "air-side.md", "chunk": 5, "split": "train"}
+{"question": "这份文档的标题是什么？", "answer": "数据中心一次侧液冷回路运维规程(虚构演示域 v1)", "source": "liquid-loop.md", "chunk": 6, "split": "train"}
+{"question": "一次侧液冷回路主泵与备用泵切换的周期和窗口是什么？", "answer": "每 45 天切换一次，窗口为周三 00:00-02:00", "source": "liquid-loop.md", "chunk": 7, "split": "test"}
+{"question": "夏季 CDU 出水温度设定值是多少？", "answer": "23 摄氏度", "source": "liquid-loop.md", "chunk": 9, "split": "train"}
+{"question": "漏液告警触发后多久必须到场定位？", "answer": "10 分钟内", "source": "liquid-loop.md", "chunk": 10, "split": "train"}
+{"question": "蓄冷罐冷量应保证的供冷不间断时间是多少？", "answer": "不低于 20 分钟", "source": "liquid-loop.md", "chunk": 11, "split": "train"}
