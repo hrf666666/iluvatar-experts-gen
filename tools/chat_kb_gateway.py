@@ -42,16 +42,20 @@ MAX_BODY = 10 * 1024 * 1024        # a request with images can be big; past this
 
 class ExpertHub:
     """Hot-pluggable expert bundles produced by tools/expert_factory.py: an expert = a trained
-    router row + a graded expert card + the KB it fronts. `route` is the trained part — a
-    softmax over the question embedding, thresholded so off-domain requests fall through to
-    the plain KB path. The hub reuses the gateway's own KBRegistry (an expert's KB loads like
-    any other) and the same embedder, so a bundle trained against :8910 plugs in unchanged."""
+    router row + a graded expert card + the KB it fronts. Two "self-*" behaviours make the
+    plug invisible to users (2026-11-04): the hub AUTODISCOVERS bundles that appear under
+    --expert-dir (a factory run lands and the expert is serving — no POST, no swap), and the
+    trained router MULTI-SELECTS: every active expert whose own classifier fires above its
+    threshold joins the answer (cards compose into one persona, retrieval merges across
+    their KBs by score), because real questions cross domains — a drunk-driving damages
+    consult is criminal law AND civil law, and the caller must not have to pick."""
 
-    def __init__(self, reg: KBRegistry, embedder):
-        self.reg, self.embedder = reg, embedder
+    def __init__(self, reg: KBRegistry, embedder, auto: bool = True):
+        self.reg, self.embedder, self.auto = reg, embedder, auto
         self.experts: dict[str, dict] = {}          # name -> {bundle, W, b, classes}
         self.active: tuple[str, ...] = ()
         self.route_log: deque = deque(maxlen=50)
+        self._dir_mtime = None
 
     def load(self, expert_dir: Path) -> dict:
         bundle = json.loads((expert_dir / "bundle.json").read_text(encoding="utf-8"))
@@ -67,6 +71,26 @@ class ExpertHub:
             self.reg.load(name, kb_src)
         return bundle
 
+    def scan(self):
+        """Autodiscover: rescan --expert-dir when its mtime changes; new bundles load AND
+        activate themselves. A cheap stat, not a watch loop — called at the top of routing."""
+        root = getattr(self, "expert_root", None)
+        if root is None or not self.auto or not root.exists():
+            return
+        m = root.stat().st_mtime_ns
+        if m == self._dir_mtime:
+            return
+        self._dir_mtime = m
+        for d in sorted(p for p in root.iterdir() if p.is_dir()):
+            if d.name in self.experts or not (d / "bundle.json").exists():
+                continue
+            try:
+                self.load(d)
+                self.active = self.active + (d.name,)
+                print(f"[expert-auto] discovered + activated: {d.name}", file=sys.stderr, flush=True)
+            except (ValueError, KeyError, OSError) as e:
+                print(f"[expert-auto] skipped {d.name}: {e}", file=sys.stderr, flush=True)
+
     def swap(self, names) -> dict:
         names = (names,) if isinstance(names, str) else tuple(names or ())
         missing = [n for n in names if n not in self.experts]
@@ -80,13 +104,16 @@ class ExpertHub:
         self.active = tuple(n for n in self.active if n != name)
         return self.list()
 
-    def route(self, question: str):
-        """-> (expert_name, prob, took) or (None, 0.0, False). Only ACTIVE experts are eligible;
-        their per-bundle thresholds gate the confidence. The decision is logged for /v1/experts."""
+    def route(self, question: str, cap: int = 3) -> list[tuple[str, float]]:
+        """Multi-select: every ACTIVE expert whose own classifier puts its class on top with
+        p >= its threshold is selected (each bundle was trained with the other experts as
+        negatives, so the per-expert scores are independent). Empty list = decline, fall
+        through to the plain KB path."""
+        self.scan()
         if not self.active or not question.strip():
-            return None, 0.0, False
+            return []
         q = self.embedder.embed([question])[0].astype(np.float32)
-        best, best_p = None, 0.0
+        picked = []
         for n in self.active:
             ex = self.experts[n]
             z = ex["W"].T @ q + ex["b"]
@@ -95,15 +122,16 @@ class ExpertHub:
             p = e / e.sum()
             i = int(p.argmax())
             if ex["classes"][i] != n or n == "off-domain":
-                continue                    # the winner must be this expert's own class
-            if p[i] > best_p:
-                best, best_p = n, float(p[i])
-        if best is None:
-            return None, 0.0, False
-        took = best_p >= self.experts[best]["bundle"].get("threshold", 0.55)
-        self.route_log.append({"q": question[:80], "expert": best if took else None,
-                               "prob": round(best_p, 3)})
-        return (best, best_p, True) if took else (None, best_p, False)
+                continue                    # this expert's own classifier declines
+            thr = ex["bundle"].get("threshold", 0.55)
+            if float(p[i]) >= thr:
+                picked.append((n, float(p[i])))
+        picked.sort(key=lambda t: -t[1])
+        picked = picked[:cap]
+        self.route_log.append({"q": question[:80],
+                               "experts": [n for n, _ in picked],
+                               "probs": {n: round(p, 3) for n, p in picked}})
+        return picked
 
     def list(self) -> dict:
         return {"active": list(self.active),
@@ -144,6 +172,8 @@ def make_handler(upstream: str, reg: KBRegistry | None, hub: ExpertHub | None):
                             {"error": "started without --kb / --kb-dir; restart with --kb-dir to use "
                                       "knowledge bases"})
             elif path == "/v1/experts":
+                if hub:
+                    hub.scan()                                 # the listing reflects the dir, live
                 self._reply(200, hub.list() if hub else
                             {"error": "started without --expert-dir; restart with it to use experts"})
             elif path == "/v1/experts/route-log":
@@ -214,7 +244,7 @@ def make_handler(upstream: str, reg: KBRegistry | None, hub: ExpertHub | None):
                                    "".join(p.get("text", "") for p in m.get("content", [])
                                            if isinstance(p, dict) and p.get("type") == "text")
                                    for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), "")
-            expert = None
+            expert = None                       # [] = multi-select from the trained routers
             if hub is not None:
                 want = req.get("expert", "auto")
                 if want is False:
@@ -222,16 +252,18 @@ def make_handler(upstream: str, reg: KBRegistry | None, hub: ExpertHub | None):
                 elif isinstance(want, str) and want not in ("", "auto"):
                     if want not in hub.experts:
                         raise ValueError(f"unknown expert: {want}")
-                    expert = want
-                elif hub.active and "kb" not in req:            # nothing asked: let the head decide
-                    name, _p, took = hub.route(last_user_text)
-                    if took:
-                        expert = name
-            names = reg.resolve(req.get("kb")) if expert is None else (expert,)
+                    expert = [want]
+                elif hub.active and "kb" not in req:            # nothing asked: the heads decide
+                    expert = [n for n, _ in hub.route(last_user_text)]
+            names = reg.resolve(req.get("kb")) if not expert else tuple(expert)
             if names is None:
                 names = reg.snapshot_names()
-            if expert is not None:
-                card = hub.experts[expert]["bundle"]["card"]
+            if expert:
+                if len(expert) == 1:
+                    card = hub.experts[expert[0]]["bundle"]["card"]
+                else:                                          # compose: one persona, several domains
+                    card = ("你同时作为以下领域的专家回答;涉及哪个领域就用哪个领域的规则与事实,并在答案里分别说明:\n\n"
+                            + "\n\n".join(f"〔领域 {n}〕\n{hub.experts[n]['bundle']['card']}" for n in expert))
                 first = messages[0] if messages else None
                 if isinstance(first, dict) and first.get("role") == "system":
                     first["content"] = f"{card}\n\n{first.get('content') or ''}"

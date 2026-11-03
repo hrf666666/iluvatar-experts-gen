@@ -1,0 +1,22 @@
+{
+  "chunks": 5,
+  "qa_total": 5,
+  "heldout": 2,
+  "router": {
+    "classes": [
+      "criminal-law",
+      "off-domain"
+    ],
+    "train_acc": 1.0,
+    "heldout_acc": 0.5,
+    "threshold": 0.35,
+    "iters": 400
+  },
+  "cards": {
+    "policy": 0.0,
+    "guide": 0.5
+  },
+  "retrieval_only_baseline": 1.0,
+  "shipped_card": "guide",
+  "build_seconds": 154.6
+}

@@ -101,10 +101,15 @@ def distill(llm: str, chunks: list[dict]) -> list[dict]:
 
 
 def synthesize_negatives(llm: str, domain_hint: str) -> list[dict]:
+    """A BROAD off-domain sample — chit-chat, movies, weather, coding, health, sports…
+    The abstain class must cover the whole out-of-domain manifold, or anything unlike both
+    the domain AND the negatives fires a false positive (measured: a movie request scored
+    0.55 on a cooling head trained on customer-service negatives only)."""
     raw = llm_chat(llm, [{"role": "user", "content": (
-        f"写出 {NEGATIVES_PER_BUILD} 个与『{domain_hint}』领域完全无关的日常客服/技术问题"
-        "(购物退货、账号、网络、办公设备等),每行一个,不要编号。")}],
-        max_tokens=300, temperature=0.8)
+        f"写出 {NEGATIVES_PER_BUILD} 个与『{domain_hint}』领域完全无关的问题,题材尽量分散:"
+        "闲聊、电影音乐、天气旅游、编程技术、医疗健康、体育、做饭、教育、金融理财、交通出行等,"
+        "每类最多一个,每行一个,不要编号。")}],
+        max_tokens=400, temperature=0.9)
     lines = [ln.strip(" -、\t") for ln in raw.splitlines() if len(ln.strip()) >= 8]
     return [{"question": q, "answer": "", "klass": "off-domain"} for q in lines[:NEGATIVES_PER_BUILD]]
 
@@ -202,7 +207,7 @@ def grade_card(llm: str, card: str, kb_chunks, embedder, test_qa: list[dict], to
 
 # ------------------------------------------------------------------ the build
 
-def build(name: str, source: Path, llm: str, embedder, out_dir: Path) -> dict:
+def build(name: str, source: Path, llm: str, embedder, out_dir: Path, negatives: str = "siblings") -> dict:
     t0 = time.time()
     print(f"[1/4] ingest {source}")
     chunks = ingest(source)
@@ -227,23 +232,25 @@ def build(name: str, source: Path, llm: str, embedder, out_dir: Path) -> dict:
     rows, labels = [], []
     for qa_ in train_qa:
         rows.append(qa_["question"]); labels.append(0)
-    for other in sorted(out_dir.glob("*/qa.jsonl")):          # negatives: the other experts' pairs
-        if other.parent.name == name:
-            continue
-        k = len(classes)
-        for line in other.read_text(encoding="utf-8").splitlines():
-            try:
-                obj = json.loads(line)
-            except ValueError:
+    if negatives == "siblings":                                 # the other experts' pairs …
+        for other in sorted(out_dir.glob("*/qa.jsonl")):
+            if other.parent.name == name:
                 continue
-            if obj.get("split") == "train":
-                rows.append(obj["question"]); labels.append(k)
-        if sum(1 for l in labels if l == k):
-            classes.append(other.parent.name)
-    if len(classes) == 1:                                       # single expert: synthesize negatives
-        for qa_ in synthesize_negatives(llm, name):
-            rows.append(qa_["question"]); labels.append(len(classes))
-        classes.append("off-domain")
+            k = len(classes)
+            for line in other.read_text(encoding="utf-8").splitlines():
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if obj.get("split") == "train":
+                    rows.append(obj["question"]); labels.append(k)
+            if sum(1 for l in labels if l == k):
+                classes.append(other.parent.name)
+    if len(classes) == 1:                                       # … else synthesized off-domain ones.
+        for qa_ in synthesize_negatives(llm, name):             # NOTE with --negatives generic the
+            rows.append(qa_["question"]); labels.append(len(classes))  # heads stay independent, so a
+        classes.append("off-domain")                             # cross-domain question can fire two.
+
     x = np.asarray(embedder.embed(rows), dtype=np.float32)
     y = np.asarray(labels, dtype=np.int64)
     w, b = train_router(x, y, len(classes))
@@ -298,12 +305,16 @@ def main():
     b.add_argument("--llm", default="http://127.0.0.1:8902", help="llama-server chat endpoint (the teacher)")
     b.add_argument("--kb-embedder", default="llama:http://127.0.0.1:8910",
                    help='"lexical" or "llama:http://host:port" (the embedder the gateway will use)')
-    b.add_argument("--out", default="experts", help="expert bundles directory (negatives come from siblings)")
+    b.add_argument("--out", default="experts", help="expert bundles directory")
+    b.add_argument("--negatives", choices=["siblings", "generic"], default="siblings",
+                   help="router negatives: sibling experts' pairs (domains mutually exclusive) or "
+                        "synthesized generic ones (heads independent -> cross-domain questions can "
+                        "select several experts)")
     args = ap.parse_args()
 
     if args.cmd == "build":
         build(args.name, Path(args.source).resolve(), args.llm.rstrip("/"),
-              make_embedder(args.kb_embedder), Path(args.out).resolve())
+              make_embedder(args.kb_embedder), Path(args.out).resolve(), args.negatives)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ One base stack (Qwen-family models served by an Iluvatar-built llama.cpp) powers
 | 💬 Chat experts | `tools/expert_factory.py` | expert bundle: trained router head + graded expert card + KB | `POST /v1/experts` on the chat gateway | ~45 s / domain |
 | ⚡ Mini JEVs (≤1B decisions) | `tools/mini_jev.py` | frozen-encoder matching head + anchors + KB | `--domain X --serve PORT` | ~5 min / domain |
 
+**Auto-sense, auto-load**: the gateway watches the expert directory — a factory run lands and the expert is live, no operator action. The trained routers score every domain independently and multi-select: a drunk-driving damages consult auto-composes the criminal-law and civil-law experts (merged persona + merged retrieval) while the caller just asks in plain text; out-of-scope questions abstain to the plain path.
+
 Both factories share the same facilities: raw documents → hot-pluggable knowledge bases, a teacher (Qwen3.8-27B or JEV-35B) for self-supervised distillation, and bge-m3 embeddings. **No backprop, no GPU training, no human labels anywhere in the loop** — every trainable piece is fitted with numpy.
 
 ## Results (measured on 2× BI-V150)

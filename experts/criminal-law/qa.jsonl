@@ -1,0 +1,5 @@
+{"question": "刑法第一百三十三条之一规定的是什么罪名？", "answer": "危险驾驶罪", "source": "dangerous-driving.md", "chunk": 0, "split": "test"}
+{"question": "在道路上醉酒驾驶机动车的，处什么刑罚？", "answer": "处拘役(一至六个月),并处罚金", "source": "dangerous-driving.md", "chunk": 1, "split": "train"}
+{"question": "醉酒驾驶的血液酒精含量认定标准是多少？", "answer": "≥ 80mg/100ml", "source": "dangerous-driving.md", "chunk": 2, "split": "test"}
+{"question": "醉驾发生重大事故致人重伤、死亡或使公私财产遭受重大损失，构成什么罪？", "answer": "交通肇事罪", "source": "dangerous-driving.md", "chunk": 3, "split": "train"}
+{"question": "危险驾驶罪有哪些从重情节？", "answer": "造成事故且负主要责任、血液酒精含量超过200mg/100ml、在高速公路驾驶、驾驶载有乘客的营运车辆、曾因酒驾被处罚、逃避阻碍检查等。", "source": "dangerous-driving.md", "chunk": 4, "split": "train"}
