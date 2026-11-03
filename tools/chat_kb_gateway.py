@@ -56,13 +56,19 @@ class ExpertHub:
         self.active: tuple[str, ...] = ()
         self.route_log: deque = deque(maxlen=50)
         self._dir_mtime = None
+        self.activation = None                      # the expert-picker mini-JEV (tools/mini_jev
+        self._anchor_emb: dict[str, np.ndarray] = {}   # --build-activation), options = domains
 
     def load(self, expert_dir: Path) -> dict:
         bundle = json.loads((expert_dir / "bundle.json").read_text(encoding="utf-8"))
         name = bundle["name"]
-        z = np.load(expert_dir / "router.npz", allow_pickle=True)
-        self.experts[name] = {"bundle": bundle, "W": z["W"], "b": z["b"],
-                              "classes": [str(c) for c in z["classes"]]}
+        head = expert_dir / "router.npz"             # a bundle with just a card is COLD-START
+        if head.exists():                            # routable: activation/zero-shot only
+            z = np.load(head, allow_pickle=True)
+            self.experts[name] = {"bundle": bundle, "W": z["W"], "b": z["b"],
+                                  "classes": [str(c) for c in z["classes"]]}
+        else:
+            self.experts[name] = {"bundle": bundle, "W": None, "b": None, "classes": []}
         src = Path(bundle["source"])
         kb_src = src.name if src.is_dir() else str(src)   # under the registry root by leaf name …
         try:                                                # … or the absolute path when it moved
@@ -82,6 +88,17 @@ class ExpertHub:
             return
         self._dir_mtime = m
         for d in sorted(p for p in root.iterdir() if p.is_dir()):
+            if d.name.startswith("_"):              # _activation & friends are routing substrate
+                h, b = d / "head.npz", d / "bundle.json"
+                if h.exists() and b.exists():
+                    z = np.load(h, allow_pickle=True)
+                    self.activation = {"U": z["U"], "V": z["V"], "T": float(z["T"]),
+                                       "options": [str(o) for o in z["options"]],
+                                       "anchors": json.loads(b.read_text(encoding="utf-8"))["anchors"],
+                                       "threshold": json.loads(b.read_text(encoding="utf-8"))["threshold"]}
+                    print(f"[expert-auto] activation head loaded (options: "
+                          f"{self.activation['options']})", file=sys.stderr, flush=True)
+                continue
             if d.name in self.experts or not (d / "bundle.json").exists():
                 continue
             try:
@@ -104,18 +121,44 @@ class ExpertHub:
         self.active = tuple(n for n in self.active if n != name)
         return self.list()
 
+    def anchor_of(self, name: str) -> str:
+        """The expert's responsibility text: bundle.anchor when the factory wrote one, else
+        the card's head — enough for zero-shot routing of experts that predate the head."""
+        b = self.experts[name]["bundle"]
+        return b.get("anchor") or b.get("card", "")[:300]
+
     def route(self, question: str, cap: int = 3) -> list[tuple[str, float]]:
-        """Multi-select: every ACTIVE expert whose own classifier puts its class on top with
-        p >= its threshold is selected (each bundle was trained with the other experts as
-        negatives, so the per-expert scores are independent). Empty list = decline, fall
-        through to the plain KB path."""
+        """Multi-select, via the activation mini-JEV when present (ONE softmax over all
+        expert anchors — a normalized, calibrated choice of which modules to side-load),
+        else via the per-expert binary heads. Empty list = decline, plain KB path."""
         self.scan()
         if not self.active or not question.strip():
             return []
         q = self.embedder.embed([question])[0].astype(np.float32)
+        # Primary: the per-expert binary heads — each renormalizes against its own broad
+        # negative class, so an out-of-domain question declines EVERYWHERE (measured:
+        # a softmax-over-experts activation head must allocate mass to some domain and
+        # false-fired on movie/code requests; the independent heads abstain cleanly).
         picked = []
+        # Cold-start companions: bundles without a trained head score zero-shot against
+        # their anchors, through the activation head's U/V when available (a bilinear
+        # matching is a better zero-shot than raw cosine; plain cosine otherwise).
+        cold = [n for n in self.active if self.experts[n]["W"] is None]
+        if cold:
+            u = self.activation["U"] if self.activation else np.eye(len(q), dtype=np.float64)
+            v = self.activation["V"] if self.activation else u
+            q2 = q.astype(np.float64) @ u
+            for n in cold:
+                a = self._anchor_emb.setdefault(
+                    n, self.embedder.embed([self.anchor_of(n)])[0].astype(np.float32))
+                k = a.astype(np.float64) @ v
+                cos = float(q2 @ k / (np.linalg.norm(q2) * np.linalg.norm(k) + 1e-9))
+                if cos >= 0.62:                          # cold-start bar: strict, never spurious
+                    picked.append((n, cos))
         for n in self.active:
             ex = self.experts[n]
+            if ex["W"] is None:                      # untrained bundle: zero-shot anchors only
+                continue
             z = ex["W"].T @ q + ex["b"]
             z = z - z.max()
             e = np.exp(z)

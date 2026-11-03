@@ -11,6 +11,8 @@ One base stack (Qwen-family models served by an Iluvatar-built llama.cpp) powers
 | 💬 Chat experts | `tools/expert_factory.py` | expert bundle: trained router head + graded expert card + KB | `POST /v1/experts` on the chat gateway | ~45 s / domain |
 | ⚡ Mini JEVs (≤1B decisions) | `tools/mini_jev.py` | frozen-encoder matching head + anchors + KB | `--domain X --serve PORT` | ~5 min / domain |
 
+**Cold-start**: a bundle with just a card (no trained router) is routable immediately via zero-shot anchor matching through the activation head's bilinear space; adjacent domains still need one factory run to take over their turf (measured: a trained head out-scores any zero-shot anchor on its own vocabulary).
+
 **Auto-sense, auto-load**: the gateway watches the expert directory — a factory run lands and the expert is live, no operator action. The trained routers score every domain independently and multi-select: a drunk-driving damages consult auto-composes the criminal-law and civil-law experts (merged persona + merged retrieval) while the caller just asks in plain text; out-of-scope questions abstain to the plain path.
 
 Both factories share the same facilities: raw documents → hot-pluggable knowledge bases, a teacher (Qwen3.8-27B or JEV-35B) for self-supervised distillation, and bge-m3 embeddings. **No backprop, no GPU training, no human labels anywhere in the loop** — every trainable piece is fitted with numpy.
@@ -57,6 +59,23 @@ The repo ships with three example KBs (`kb/ecom-support`, `kb/cloud-ops`, `kb/fa
 - **Mini JEV** — a ≤1B decision expert: `logit_i = (U·e_query)·(V·e_option)` with a frozen bge-m3 encoder; options are represented by **anchor texts** distilled once from the KB, so head parameters never grow with the candidate count and requests may declare any subset/order of options. Serves the same `/decide` shape as the JEV-35B gateway (`kind=choice`).
 
 The tools stay honest about what each layer can and cannot do: the 0.6B experiment (kept in `tools/jev_distill.py`) documents that calibration-only distillation cannot rescue a backbone with no signal, which is exactly why the mini-JEV line exists.
+
+## Performance (JEV-35B decisions, 2× BI-V150, all without leaving llama.cpp)
+
+| Scenario | Before | After | Lever |
+|---|---|---|---|
+| repeated decision (same state + question) | ~1.35 s | **99 ms (13.7×)** | `cache_prompt: true` + single slot |
+| cold decision (new ticket) | ~1.35 s | **917 ms (−32%)** | `kb_top_k: 2` — quality held at 5/5 (p ≥ 0.95) |
+| no-KB decision (`kb:false`) | ~0.5 s | 161 ms | short prompt |
+| one state, N questions | N × cold | `/decide_batch` | one retrieval pass + shared prefix |
+
+Measured limits of this engine build, kept here so nobody re-sweeps them: no partial
+prefix reuse (any prompt change re-prefills; `--cache-reuse` is ineffective and
+occasionally trips the logprobs glitch), and prefill sits at ~300 tok/s regardless of
+`-t/-b/-ub` (MoE kernel bound, not scheduler bound). The two levers that do work are
+prompt length and exact-resend caching. Recommended JEV server flags:
+`llama-server ... -t 16 --parallel 1`. Next documented step: requantize JEV-35B to
+Q3_K_M with the bundled `llama-quantize` for another ~20-25% (bandwidth-bound regime).
 
 ## Repo layout
 

@@ -101,7 +101,8 @@ class JevHead:
             "temperature": 1.0,       # full distribution, like serve_decide.py's READ
             "top_p": 1.0, "top_k": 0, "min_p": 0.0,
             "logprobs": TOP_K,        # a label outside the top TOP_K has negligible probability
-        }
+            "cache_prompt": True,     # /v1/completions does not cache by default in this build;
+        }                            # without it every decision re-prefills the whole state
         lps = None
         for attempt in range(3):
             # llama-server very rarely answers logprobs:null on a slot's first task after startup;
@@ -211,6 +212,8 @@ def main():
             try:
                 if path == "/decide":
                     self._decide(self._body())
+                elif path == "/decide_batch":
+                    self._decide_batch(self._body())
                 elif reg is None:
                     self._reply(404, {"error": "started without --kb / --kb-dir; restart with --kb-dir to use "
                                                "knowledge bases"})
@@ -251,6 +254,33 @@ def main():
             self._reply(200, {"answer": top["label"], "prob": top["prob"], "distribution": result,
                               "latency_ms": round((time.time() - t0) * 1000, 1),
                               "kb": [kb.name for kb in (reg.snapshot(names) if reg and names else ())]})
+
+        def _decide_batch(self, req):
+            """FLIDE-style state forking on our engine: ONE state (+ one retrieval pass for
+            the KB context), then N questions sent back-to-back so llama-server's prompt
+            cache dedupes the shared prefix — each question pays only its own tail + one
+            token of decode. Same-kind questions share the whole prefix; mixed kinds still
+            work (the cache matches the longest common token prefix)."""
+            t0 = time.time()
+            if reg is None:
+                names = ()
+            else:
+                names = reg.resolve(req.get("kb")) or reg.snapshot_names()
+            state = req.get("state") or ""
+            ctx = kb_context(reg, names, "", state, req.get("kb_top_k", 4))
+            full_state = ctx + state
+            out = []
+            for q in req.get("questions", []):
+                t1 = time.time()
+                result = head.decide(base, q.get("kind", "choice"), full_state,
+                                     q.get("question", ""), q.get("options") or [])
+                top = max(result, key=lambda r: r["prob"])
+                out.append({"question": q.get("question", ""), "answer": top["label"],
+                            "prob": top["prob"], "distribution": result,
+                            "latency_ms": round((time.time() - t1) * 1000, 1)})
+            self._reply(200, {"decisions": out,
+                              "total_ms": round((time.time() - t0) * 1000, 1),
+                              "questions": len(out)})
 
         def log_message(self, *a):
             pass

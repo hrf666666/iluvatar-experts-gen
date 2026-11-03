@@ -274,6 +274,10 @@ def build(name: str, source: Path, llm: str, embedder, out_dir: Path, negatives:
     best_style = max(scores, key=scores.get)
     print(f"      cards={scores} retrieval_only_baseline={baseline} -> ship '{best_style}'")
 
+    anchor = llm_chat(llm, [{"role": "user", "content": (
+        "用一句话(30字内)概括以下资料所属领域及其覆盖的业务,只输出这一句话。\n\n"
+        + digest[:2000])}], max_tokens=60, temperature=0.1).strip().splitlines()[0][:60]
+
     d = out_dir / name
     d.mkdir(parents=True, exist_ok=True)
     np.savez(d / "router.npz", W=w, b=b, classes=np.array(classes, dtype=object))
@@ -288,7 +292,8 @@ def build(name: str, source: Path, llm: str, embedder, out_dir: Path, negatives:
                "cards": scores, "retrieval_only_baseline": baseline,
                "shipped_card": best_style, "build_seconds": round(time.time() - t0, 1)}
     (d / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
-    bundle = {"name": name, "source": str(source), "card": cards[best_style],
+    bundle = {"name": name, "source": str(source), "anchor": anchor,
+              "card": cards[best_style],
               "card_style": best_style, "threshold": threshold, "built_at": time.time(),
               "metrics": metrics}
     (d / "bundle.json").write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")

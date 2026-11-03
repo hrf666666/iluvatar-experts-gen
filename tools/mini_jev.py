@@ -41,7 +41,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.knowledge import KBRegistry, make_embedder            # the shared retrieval stack
-from tools.jev_distill import DOMAINS, gen_cases                 # rejection-sampled teacher cases
+from tools.jev_distill import DOMAINS, gen_cases                # rejection-sampled teacher cases
+from tools.expert_factory import synthesize_negatives             # broad off-domain questions
 
 RANK = 64
 ITERS = 800
@@ -100,7 +101,7 @@ def softmax(z):
     return e / e.sum(axis=-1, keepdims=True)
 
 
-def fit(eq, eo, ys, ws):
+def fit(eq, eo, ys, ws, t_max=4.0):
     """eq: (n,d) query embeddings, eo: (n,k,d) per-case option embeddings, ys: labels, ws: weights.
     Full-batch GD on CE over logits (eq@U)·(V·eo) — U,V are d×r, temperature scalar."""
     n, d = eq.shape
@@ -127,12 +128,92 @@ def fit(eq, eo, ys, ws):
         gu, gv, gt = gu / n + L2 * u, gv / n + L2 * v, gt / n
         u -= LR * gu
         v -= LR * gv
-        log_t = float(np.clip(log_t - 0.1 * LR * gt, math.log(0.3), math.log(4.0)))
+        log_t = float(np.clip(log_t - 0.1 * LR * gt, math.log(0.3), math.log(t_max)))
     return u, v, math.exp(float(log_t)), loss / n
 
 
 def predict(u, v, t, q, opts):
     return softmax(((q @ u) @ (opts @ v).T) / t)
+
+
+
+
+# ------------------------------------------------------------------ activation: the expert-picker mini-JEV
+
+OFFDOMAIN_ANCHOR = ("off-domain: 与所有已注册领域无关的日常问题(闲聊、电影、天气、编程、医疗、体育等)")
+
+
+def build_activation(experts_dir: Path, kb_dir, writer, embedder_spec, out_dir: Path):
+    """Train ONE mini-JEV whose options are the expert domains themselves — the fast
+    System-1 that decides which expert modules to activate (25-30 ms), so the heavyweight
+    model only ever answers with the right persona+KB side-loaded. An expert landed after
+    this training is still routable: the gateway scores it zero-shot from its anchor."""
+    import urllib.request as _u
+
+    def chat(base, content, max_tokens=200):
+        req = _u.Request(f"{base}/v1/chat/completions", data=json.dumps(
+            {"messages": [{"role": "user", "content": content}], "max_tokens": max_tokens,
+             "temperature": 0.9, "chat_template_kwargs": {"enable_thinking": False}}).encode(),
+            headers={"Content-Type": "application/json"})
+        with _u.urlopen(req, timeout=300) as r:
+            return json.load(r)["choices"][0]["message"]["content"] or ""
+    _ = chat  # (kept for interface symmetry; negatives come from synthesize_negatives)
+
+    emb = make_embedder(embedder_spec)
+    names, anchors, qs, ys = [], {}, [], []
+    for d in sorted(experts_dir.iterdir()):
+        qa, b = d / "qa.jsonl", d / "bundle.json"
+        if not d.is_dir() or d.name.startswith("_") or not (qa.exists() and b.exists()):
+            continue
+        bundle = json.loads(b.read_text(encoding="utf-8"))
+        anchors[d.name] = bundle.get("anchor") or (bundle.get("card", "")[:300])
+        k = len(names)
+        for line in qa.read_text(encoding="utf-8").splitlines():
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("split") == "train":
+                qs.append(obj["question"]); ys.append(k)
+        if any(y == k for y in ys):
+            names.append(d.name)
+    if len(names) < 2:
+        raise SystemExit("need >=2 trained experts under --experts for an activation head")
+    anchors["off-domain"] = OFFDOMAIN_ANCHOR
+    k_all = len(names) + 1
+    neg = []
+    for hint in (" / ".join(names), "日常生活与兴趣爱好"):
+        neg += [(q["question"], k_all - 1) for q in synthesize_negatives(writer, hint)]
+    qs += [q for q, _ in neg]; ys += [y for _, y in neg]
+    names.append("off-domain")
+    print(f"[activation] experts={names[:-1]} + off-domain | cases={len(qs)}")
+
+    opt_mat = np.asarray(emb.embed([anchors[n] for n in names]), dtype=np.float64)
+    eq = np.asarray(emb.embed(qs), dtype=np.float64)
+    eo = np.repeat(opt_mat[None, :, :], len(qs), axis=0)   # every case's option set = ALL options
+    u, v, t, ce = fit(eq, eo, np.asarray(ys), np.ones(len(ys)), t_max=1.5)
+    acc = float(np.mean([int(np.argmax(predict(u, v, t, eq[i], eo[i]))) == ys[i] for i in range(len(ys))]))
+    # multi-select threshold: smallest cutoff whose selected-set always contains the true expert
+    thr = 0.35
+    for cand in (0.5, 0.45, 0.4, 0.35, 0.3, 0.25):
+        sel_ok = all(ys[i] in np.where(predict(u, v, t, eq[i], eo[i]) >= cand)[0]
+                     for i in range(len(ys)) if names[ys[i]] != "off-domain")
+        neg_ok = all(np.where(predict(u, v, t, eq[i], eo[i]) >= cand)[0].size == 0
+                     for i in range(len(ys)) if names[ys[i]] == "off-domain")
+        if sel_ok and neg_ok:
+            thr = cand
+            break
+    print(f"[activation] T={t:.3f} CE={ce:.3f} train_acc={acc:.2f} multiselect_threshold={thr}")
+
+    d = out_dir / "_activation"
+    d.mkdir(parents=True, exist_ok=True)
+    np.savez(d / "head.npz", U=u, V=v, T=np.asarray(t), opt_emb=opt_mat,
+             options=np.array(names, dtype=object))
+    (d / "bundle.json").write_text(json.dumps(
+        {"options": names, "anchors": anchors, "threshold": thr,
+         "train_acc": round(acc, 3), "cases": len(qs), "built_at": time.time()},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[done] {d}/ — the gateway picks this up automatically on its next scan")
 
 
 # ------------------------------------------------------------------ build / serve
@@ -263,6 +344,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", metavar="DOMAIN", help="train this domain's mini-JEV bundle")
+    ap.add_argument("--build-activation", action="store_true",
+                    help="train the expert-picker mini-JEV over an experts dir (options = domains)")
+    ap.add_argument("--experts", default="../iluvatar-strata/experts-auto", type=Path,
+                    help="expert bundles dir for --build-activation (needs */qa.jsonl + bundle.json)")
     ap.add_argument("--kb-dir", default="../kb")
     ap.add_argument("--teacher", default="http://127.0.0.1:5500")
     ap.add_argument("--writer", default="http://127.0.0.1:8902")
@@ -272,7 +357,10 @@ def main():
     ap.add_argument("--domain", help="serve this domain")
     ap.add_argument("--serve", type=int, metavar="PORT")
     args = ap.parse_args()
-    if args.build:
+    if args.build_activation:
+        build_activation(args.experts, Path(args.kb_dir), args.writer.rstrip("/"),
+                         args.embedder, args.out)
+    elif args.build:
         build(args.build, Path(args.kb_dir), args.teacher.rstrip("/"), args.writer.rstrip("/"),
               args.embedder, args.out, args.per_team)
     elif args.serve and args.domain:
