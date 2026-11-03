@@ -2,107 +2,105 @@
 
 **中文 · [English](README.md)**
 
-在国产卡（天数智芯 Iluvatar BI-V150 / CoreX）上**批发 MoE 专家和小 JEV**——知识库侧载 + 对应专业领域的边缘决策，底层基于 **Qwen** 架构。
+一句话：**在国产 GPU（天数智芯）上，把一堆文档变成一个"领域专家"——几分钟一个，不训练模型，随时上线、随时更换。**
 
-一套底座（llama.cpp Iluvatar 构建承载的 Qwen 系模型）驱动两条全自动产线：
+底层跑的是 Qwen 系模型 + llama.cpp（天数卡专用构建），需要的只是一块天数卡或一台多核 CPU 机器。
 
-| 产线 | 工厂 | 产物 | 热插拔方式 | 产出耗时 |
-|---|---|---|---|---|
-| 💬 聊天专家 | `tools/expert_factory.py` | 专家包：训练好的路由头 + 评分优选的专家卡 + 知识库 | 聊天网关 `POST /v1/experts` | ~45 秒/域 |
-| ⚡ 小 JEV（≤1B 决策） | `tools/mini_jev.py` | 冻结编码器 + 匹配头 + 选项锚点 + 知识库 | `--domain X --serve 端口` | ~5 分钟/域 |
+## 它能干什么？三个例子
 
-**冷启动**：只有卡片、没有训练路由头的新专家也能立即被路由（经激活头双线性空间的锚点零样本匹配）；相邻领域的接管仍需跑一次工厂（实测：训练过的头在自己的词汇领地上必然压过零样本锚点）。
+**例 1：知识问答（chat 专家）**
+把你的规章制度、产品手册放进 `kb/` 目录，跑一条命令。之后用户直接用大白话提问，系统自动检索相关段落喂给大模型——回答有出处、不瞎编。换一批文档？服务不重启，秒级生效。
 
-**自感知、自加载**：网关监视专家目录——工厂产物落地即上线，零运维动作。路由头对每个域独立打分、多选组合：问“酒驾撞车拒赔修车费”会自动合成刑法+民法两个专家（人设合并、检索跨库归并），用户只管用自然语言提问；域外问题自动弃权走通用路径。
+**例 2：工单自动分派（小 JEV）**
+同一份文档，再跑一条命令，得到一个"小 JEV"：一个 0.5B 规模的微型判断模型，**25-30 毫秒**就能判断一张工单该给哪个组（计费？物流？技术支持？）。一台边缘设备就能跑，速度是大模型的 6 倍以上。
 
-两条产线共享同一套设施：原始文档 → 可热插拔知识库，教师模型（Qwen3.8-27B / JEV-35B）自监督蒸馏，bge-m3 嵌入。**全流程无反向传播、无 GPU 训练、无人工标注**——所有可训练部件均由 numpy 拟合。
+**例 3：多领域自动组合**
+用户问"朋友酒驾撞了我的车还拒赔修车费"——这横跨刑法和民法。系统**自动**同时激活这两个领域的专家，把两边的知识合并起来回答。用户全程无感，不需要选任何"模式"。
 
-## 实测结果（2× BI-V150）
+## JEV-35B 决策加速（实测数字）
 
-| 决策方案 | 激活计算量 | 金标准 5 项 | 单次决策延迟 |
+生产用的大判断模型 JEV-35B，我们做了一轮针对性加速。全部在 llama.cpp 里完成，不换引擎、不装 torch：
+
+| 场景 | 加速前 | 加速后 | 怎么做到的 |
 |---|---|---|---|
-| 0.6B 小 LLM + 头部校准 | 0.6B | 1/5（输出与输入无关，死路） | 40–140 ms |
-| 4B 小 LLM + 头部校准 | 4B | 4/5 | 192–376 ms |
-| **小 JEV（冻结 bge-m3 + r64 匹配头）** | **0.5B 级，模型仅 467MB** | **5/5** | **25–30 ms** |
-| JEV-35B 教师（参照） | 3B 激活 | 5/5 | 热 ~172 ms |
+| 同一问题重复决策 | 1.35 秒 | **0.1 秒（快 13.7 倍）** | 打开 prompt 缓存——这个引擎默认竟然是关的 |
+| 全新工单首次决策 | 1.35 秒 | **0.9 秒（快 32%）** | 检索文档从 4 段减到 2 段，五项标准测试依然全对 |
+| 一张工单连问多个问题 | 每问从头算一遍 | 共享一次计算 | 新增 `/decide_batch` 接口 |
 
-聊天侧：Qwen3.8-27B GPU 12.6 tok/s；专家热切换秒级生效，**模型进程零重启**（挂载/激活/使用/删除全周期以 PID 验证）。
+顺带把引擎的底摸清了（写进文档省得后人再踩）：这个 llama.cpp 构建**没有部分前缀复用**——问题改一个字就整段重算；prefill 速度约 300 token/秒，是 MoE 内核的天花板，调线程数、批次参数统统没用。真正管用的杠杆只有两个：**把提示变短**和**精确重发缓存**。
 
-## 快速上手
+## 小 JEV 的成绩，和一条重要的实测结论
+
+| 判断方案 | 规模 | 标准五项测试 | 单次延迟 |
+|---|---|---|---|
+| 0.6B 小语言模型 + 校准 | 0.6B | 1/5（输出和输入无关，废） | — |
+| 4B 小语言模型 + 校准 | 4B | 4/5 | 0.2-0.4 秒 |
+| **本仓库的小 JEV** | **0.5B，模型仅 467MB** | **5/5 全对** | **25-30 毫秒** |
+| JEV-35B（参照） | 3B 激活 | 5/5 | 0.1-0.9 秒 |
+
+那条重要结论：**想靠"给 0.6B 小模型调参数表"获得判断能力，走不通**——底座太小就没有判断信号，社区同行的做法也一样（要么上 LoRA 训练，要么 4B 起步）。本仓库的小 JEV 走了第三条路：冻结一个现成的文本编码器（bge-m3），只用 numpy 训练一个很小的"匹配头"，不碰大模型、不需要训练卡，效果反而最好、速度最快。
+
+## 五分钟上手
 
 ```bash
-pip install numpy                          # 唯一依赖
-bash scripts/setup-iluvatar.sh             # ivcc + CoreX 软链 + 探针（每次 pod 重置后跑一次）
-LLAMA_BIN=<llama.cpp-iluvatar构建>/bin bash scripts/start-expert-services.sh
+pip install numpy                              # 唯一依赖
+bash scripts/setup-iluvatar.sh                 # 天数卡环境初始化（装探针、补软链）
 
-# — 从原始文档批发一个聊天专家（自蒸馏 + 拒绝采样，全自动）—
+# 第一步：起服务（聊天模型 + 嵌入器 + 网关）
+LLAMA_BIN=<llama.cpp天数构建>/bin bash scripts/start-expert-services.sh
+
+# 第二步：把文档变成聊天专家（全自动，约 1 分钟）
 python3 tools/expert_factory.py build my-domain --source kb/my-domain \
     --llm http://127.0.0.1:8902 --kb-embedder llama:http://127.0.0.1:8910 --out experts
 
-# — 运行中热插拔进聊天网关（什么都不重启）—
+# 第三步：立刻可用（什么都不用重启）
 curl -X POST localhost:5000/v1/experts -d '{"name": "my-domain"}'
 curl -X POST localhost:5000/v1/experts/swap -d '{"active": ["my-domain"]}'
-curl localhost:5000/v1/chat/completions -d '{"messages":[{"role":"user","content":"…"}]}'
+curl localhost:5000/v1/chat/completions -d '{"messages":[{"role":"user","content":"你的问题"}]}'
 
-# — 批发一个小 JEV（冻结编码器 + numpy 拟合匹配头）—
+# 想要工单分派的小 JEV？一条命令（约 5 分钟），起服务后 25ms 出结果
 python3 tools/mini_jev.py --build my-domain --kb-dir kb --out mini-jevs
 python3 tools/mini_jev.py --domain my-domain --kb-dir kb --serve 5504
-curl localhost:5504/decide -d '{"state":"…","question":"该哪个组处理?","options":["甲","乙","丙"]}'
+curl localhost:5504/decide -d '{"state":"工单内容","question":"该哪个组处理?","options":["计费","物流"]}'
 ```
 
-仓库自带三个示例知识库（`kb/ecom-support`、`kb/cloud-ops`、`kb/facility-cooling`）和全部预构建产物——不训练任何东西，上面的 serve 命令开箱即用。
+仓库里带了三个现成的示例（电商客服、GPU 云运维、民法/刑法），预构建的专家包和小 JEV 都在，**不训练任何东西**，上面的服务命令开箱即用。
 
-## 这里的"专家"指什么
+## 它是怎么工作的（一段话说清）
 
-- **知识库**——纯文件（`.md/.txt/.jsonl/...`）切块 + 嵌入，检索就是与行归一化矩阵的点积；运行时热加载/卸载/切换/多库并激活；在途请求持快照，永不被切换撕裂。
-- **聊天专家包**——问题嵌入上的 softmax **路由头**（numpy 真梯度训练）+ **专家卡**（系统人设，模型起草两种风格、held-out 事实命中评分择优）+ 所挂知识库。
-- **小 JEV**——≤1B 决策专家：`logit_i = (U·e_query)·(V·e_option)`，编码器冻结；选项用从知识库一次性蒸馏的**锚点文本**表示——头参数不随候选数增长，请求可任意声明选项子集与顺序；对外提供与 JEV-35B 网关同形的 `/decide` API（`kind=choice`）。
+文档被切成小段、算出语义向量，检索就是一次向量点积——所以加载和切换都是毫秒级。每个"专家"= 一个知识库 + 一张自动生成的"职责卡片"（告诉大模型以什么身份、按什么规则回答）+ 一个自动训练的路由头（判断用户的问题归不归这个专家管，归就激活它）。"小 JEV"= 把"判断该归谁"这件事交给一个冻结的编码器加一个 numpy 小头，25 毫秒出答案。全程**没有大模型训练**：所有"训练"都是对很小部件的拟合，几分钟完成。
 
-工具链对每层能力边界保持诚实：`tools/jev_distill.py` 保留了 0.6B/4B 规模阈值实验——头部校准救不了没有信号的底座，这正是小 JEV 产线存在的原因。
+## 已知限制（实话实说）
 
-## 性能（JEV-35B 决策，2× BI-V150，全部不离开 llama.cpp）
-
-| 场景 | 加速前 | 加速后 | 手段 |
-|---|---|---|---|
-| 重复决策（同状态同问题） | ~1.35s | **99ms（13.7×）** | `cache_prompt: true` + 单槽缓存 |
-| 冷决策（全新工单） | ~1.35s | **917ms（−32%）** | `kb_top_k: 2`——质量 5/5 全保（p ≥ 0.95） |
-| 无库决策（`kb:false`） | ~0.5s | 161ms | 提示本身短 |
-| 一态多问 | N × 冷 | `/decide_batch` | 一次检索 + 共享前缀 |
-
-本构建的实测边界（写在这里免得后人重扫）：**没有部分前缀复用**（提示变一个字就全量
-prefill；`--cache-reuse` 无效且偶发 logprobs 毛刺）；prefill 恒在 ~300 tok/s，`-t/-b/-ub`
-全参数扫描无差（MoE 内核瓶颈，非调度瓶颈）。真正生效的两个杠杆是**提示长度**和
-**精确重发缓存**。JEV 服务推荐参数：`llama-server ... -t 16 --parallel 1`。
-已留档的下一步：用随仓库的 `llama-quantize` 把 JEV-35B 重量化到 Q3_K_M，带宽受限场景
-预计再拿 20-25%。
+- 新专家落地的瞬间即可被路由（零样本冷启动），但**相邻领域**的接管需要重跑一次工厂（约 3 分钟）——训练过的路由头在自己的词汇领地上必然压过零样本锚点；
+- 路由层用的是"每域独立判断 + 弃权"，不是"全体专家抢一个 softmax"——实测后者在开放世界输入上必然误分配（问电影也会分给某个专家）；
+- 天数卡的 llama.cpp 构建坑不少（探针判卡、CoreX 5.0 缺库等），`docs/iluvatar-ops.md` 有完整踩坑记录，都是实测换来的。
 
 ## 目录结构
 
 ```
-serve/knowledge.py        热插拔知识库引擎（嵌入器/切块/注册表快照）
-tools/chat_kb_gateway.py  OpenAI 兼容聊天网关：KB 注入 + 专家热插拔 + 训练路由分发
-tools/jev_decide.py       JEV-35B 决策网关（verbalizer 读出、重试、热 KB）
-tools/expert_factory.py   聊天专家工厂（自蒸馏 QA → 路由头 → 评分专家卡）
-tools/mini_jev.py         小 JEV 工厂 + 服务（冻结编码器 + 匹配头）
-tools/jev_distill.py      教师→LLM 学生头部蒸馏（规模阈值实验存档）
-tools/moe_surgery.py      MoE GGUF 离线手术（前缀切层；剪专家 = 路线图）
-iluvatar/                 ivcc（CoreX clang CUDA 包装）、corex_compat.h、探针源码
-kb/                       示例知识库
-experts*/、mini-jevs/     预构建示例产物（用工厂随时重建）
-scripts/                  硬件初始化、服务启动、决策演示套件
-docs/iluvatar-ops.md      硬件与构建手册（雷点全记录，均为实测踩坑）
+serve/knowledge.py        知识库引擎（切块/向量化/热插拔）
+tools/chat_kb_gateway.py  聊天网关：检索增强 + 专家自动发现/自动路由/多专家组合
+tools/jev_decide.py       JEV-35B 决策网关（含 /decide_batch 批量接口）
+tools/expert_factory.py   聊天专家工厂（约 1 分钟/域）
+tools/mini_jev.py         小 JEV 工厂 + 服务（约 5 分钟/域，25ms 出结果）
+tools/jev_distill.py      小语言模型蒸馏实验存档（0.6B/4B 规模阈值结论出处）
+tools/moe_surgery.py      MoE 模型离线手术工具（GGUF 切层/剪枝研究用）
+kb/                       示例知识库（电商/GPU 运维/民法/刑法/机房制冷）
+experts*/、mini-jevs/     预构建产物（用工厂随时重建）
+scripts/                  环境初始化、服务启动
+docs/iluvatar-ops.md      天数卡硬件与构建手册（踩坑全记录）
 ```
 
 ## 路线图
 
-- [ ] `moe_surgery.py` 剪专家（保深度、256→K），产出瘦身 JEV-35B 变体
-- [ ] 小 JEV 支持 `score` / `noul` 决策类型；未见团队的按请求锚点
-- [ ] LoRA 侧载通路（llama-server `POST /lora-adapters`），外部训练器产出 adapter 即接入
-- [ ] 小 JEV 产线引入更小编码器（bge-small），把边缘占用压到 150MB 以下
+- [ ] JEV-35B 重量化到 Q3_K_M（带宽受限场景预计再快 20-25%，需重跑五项测试验质量）
+- [ ] 小 JEV 支持 score/noul 两种决策类型
+- [ ] LoRA 侧载通路（外部训练器产出 adapter，经 llama-server 的 /lora-adapters 接口热挂载）
 
 ## 致谢
 
-基于 [llama.cpp](https://github.com/ggml-org/llama.cpp)（Iluvatar/CoreX 移植）、Qwen 系模型与类型化决策（"Jev"）模型思想构建；小 JEV 的设计参考了开源社区（mini-Jev、kotoba typed-decisions、joyfox 0.8B）的共识。完整实测记录见 `docs/iluvatar-ops.md`。
+基于 [llama.cpp](https://github.com/ggml-org/llama.cpp)（天数/CoreX 移植）、Qwen 系模型与类型化决策模型（"Jev"）思想构建；小 JEV 设计参考了开源社区（mini-Jev、kotoba typed-decisions、joyfox）的共识。完整实测记录见 `docs/iluvatar-ops.md`。
 
 ## 许可
 
