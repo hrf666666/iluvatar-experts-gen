@@ -98,11 +98,21 @@ scripts/                  环境初始化、服务启动
 docs/iluvatar-ops.md      天数卡硬件与构建手册（踩坑全记录）
 ```
 
+## 真实权重增量专家：已端到端跑通一次
+
+在外部 RTX 3090 上训练了 Qwen3-4B 的法律 LoRA 专家（民法+刑法，46 个拒绝采样案例，
+33M 可训练参数 = 0.81%，3 分钟），`convert_lora_to_gguf.py` 转换后在天数卡 pod 上经
+llama-server 的 `/lora-adapters` 热挂载。边界难题集（血液酒精 72/65/81mg 临界、无酒精
+事故、逃逸拒赔）行为学对照：adapter 关 4/6（p=0.25 基座在猜）→ 运行时
+`POST /lora-adapters [{"id":0,"scale":1.0}]` → **6/6 全对（p≥0.99）**，服务进程同一
+PID 全程零重启。实测接口边界：运行时只能管理预载的 adapter（未知 id 静默无效）；
+本构建 `--lora-init-without-apply` 不生效。产物在 `lora/`。
+
 ## 路线图
 
 - [ ] JEV-35B 重量化到 Q3_K_M（带宽受限场景预计再快 20-25%，需重跑五项测试验质量）
 - [ ] 小 JEV 支持 score/noul 两种决策类型
-- [ ] LoRA 侧载通路（外部训练器产出 adapter，经 llama-server 的 /lora-adapters 接口热挂载）
+- [x] LoRA 侧载通路（首个专家已上线，见上节）（外部训练器产出 adapter，经 llama-server 的 /lora-adapters 接口热挂载）
 
 ## 致谢
 

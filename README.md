@@ -98,11 +98,23 @@ scripts/                  setup + stack launcher
 docs/iluvatar-ops.md      the Iluvatar hardware & build runbook
 ```
 
+## Real weight-increment experts: done once, end to end
+
+A Qwen3-4B LoRA law expert (civil + criminal) was trained on an external RTX 3090
+(46 rejection-sampled cases, 33M trainable params = 0.81%, 3 minutes), converted with
+`convert_lora_to_gguf.py`, and hot-mounted on the Iluvatar pod through llama-server's
+`/lora-adapters`. Verified behavior on a deliberately hard boundary set (blood-alcohol
+72/65/81 mg edges, sober accidents, hit-and-run + refusal): adapter OFF 4/6 with p=0.25
+(the base guessing) → runtime `POST /lora-adapters [{"id":0,"scale":1.0}]` → **6/6 with
+p≥0.99**, same server PID throughout (zero restarts). Interface limits measured: only
+pre-loaded adapters can be managed at runtime (unknown ids silently no-op), and
+`--lora-init-without-apply` does not hold on this build. Artifacts in `lora/`.
+
 ## Roadmap
 
 - [ ] Requantize JEV-35B to Q3_K_M for another ~20-25% (bandwidth-bound regime; re-run the 5-test suite)
 - [ ] score / noul decision kinds for mini JEVs
-- [ ] LoRA side-load path (adapters trained elsewhere, hot-mounted via llama-server's /lora-adapters)
+- [x] LoRA side-load path (first expert shipped, see above) (adapters trained elsewhere, hot-mounted via llama-server's /lora-adapters)
 
 ## Acknowledgments
 
