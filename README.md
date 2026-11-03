@@ -70,6 +70,12 @@ The repo ships three ready-made examples (e-commerce support, GPU cloud ops, civ
 
 Documents are chunked and embedded; retrieval is a dot product against the matrix, which is why load/swap takes milliseconds. An "expert" = a knowledge base + an auto-generated "responsibility card" (telling the LLM who it is and which rules to follow) + an auto-trained router head (deciding whether an incoming question belongs to this expert — if yes, it activates). The "mini JEV" hands the "who handles this" judgment to a frozen encoder plus a small numpy head: 25 ms per answer. **No LLM training anywhere** — every "training" step is just fitting a very small part, in minutes.
 
+## What "expert" actually means (read this before you complain)
+
+The "experts" in this repo are **NOT** the MoE expert weights inside the base model — those FFN blocks are untouched and untouchable here (no trainer on this stack). Our experts live in the **activation layer**: a knowledge base + a responsibility card + a trained router head. What you get beyond a bare RAG setup is the *judgment* — which domain a question belongs to, whether to compose several, when to abstain — done by genuinely trained (numpy-fitted) small heads at 25 ms.
+
+The E in MoE still matters, implicitly: the reason one base model can answer credibly across all these domains is its MoE capacity. Operating on the E explicitly (training real weight deltas per domain) has exactly one road here: produce LoRA adapters on an external trainer and hot-mount them via llama-server's `/lora-adapters` — the interface is ready, see the roadmap.
+
 ## Known limitations (honestly)
 
 - A newly landed expert is routable instantly (zero-shot cold start), but taking over an **adjacent domain** needs one factory rerun (~3 min) — a trained router head always out-scores a zero-shot anchor on its own vocabulary;
