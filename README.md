@@ -83,6 +83,19 @@ Documents are chunked and embedded. Retrieval is a dot product against the matri
 
 No LLM training happens anywhere. Knowledge packages and mini JEVs train only small parts with numpy. The 33M-parameter LoRA expert trains on the Iluvatar card with the vendor torch.
 
+## Measured: are there domain-dedicated MoE experts
+
+We profiled the live routing of the 35B-A3B base on five domain corpora with hooks on
+all 40 router gates. After normalization the verdict is clear. Zero of the 256 experts
+are dedicated to any domain at even 50 percent purity. All five domains split the
+experts almost evenly, 40 to 62 each. No layer band specializes. Jensen-Shannon
+divergence between domain routing distributions runs 0.020 to 0.064 bits, with civil
+law and criminal law closest and tech-versus-law farthest, so semantic structure
+exists but is faint. The practical consequences follow. Pruning experts by domain is
+not possible because there are no domain experts to remove. Expert-targeted LoRA has
+weak signal because a domain adapter would touch nearly every expert anyway. The
+profiling script is `tools/moe_profile.py`.
+
 ## Known limitations
 
 Local training on the Iluvatar card scores 5 of 6 on the boundary set versus 6 of 6 on the 3090. The gap comes from the hand-written pure bf16 loop versus mixed precision. The fix direction is fp32 master weights.
