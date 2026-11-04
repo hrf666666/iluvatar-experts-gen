@@ -1,0 +1,109 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 60c5633..c1ef7b5 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -987,6 +987,13 @@ private:
+ 
+     common_params params_base;
+ 
++    // vLLM-style runtime hot-add (2026-11-05): POST /lora-adapters entries carrying
++    // "path" load a NEW adapter file into a running server. Ownership lives here;
++    // hot_lora_mutex guards every access to params_base.lora_adapters, which the
++    // server task loop otherwise reads per request (launch_slot / GET_LORA / SET_LORA).
++    std::vector<llama_adapter_lora_ptr> hot_loras;
++    std::mutex hot_lora_mutex;
++
+     // note: keep these alive - they determine the lifetime of the model, context, etc.
+     common_init_result_ptr llama_init;
+ 
+@@ -1865,6 +1872,7 @@ private:
+                 slot.lora = task_loras;
+             }
+         } else {
++            std::lock_guard<std::mutex> lk(hot_lora_mutex);
+             slot.lora = params_base.lora_adapters;
+         }
+ 
+@@ -3051,6 +3059,7 @@ private:
+             case SERVER_TASK_TYPE_GET_LORA:
+                 {
+                     // TODO @ngxson : make lora_adapters a dedicated member of server_context
++                    std::lock_guard<std::mutex> lk(hot_lora_mutex);
+                     auto & loras = params_base.lora_adapters;
+                     auto res = std::make_unique<server_task_result_get_lora>();
+                     res->id = task.id;
+@@ -3076,6 +3085,31 @@ private:
+                 } break;
+             case SERVER_TASK_TYPE_SET_LORA:
+                 {
++                    for (const auto & [path, scale] : task.hot_add_lora) {
++                        int found = -1;
++                        for (size_t i = 0; i < params_base.lora_adapters.size(); ++i) {
++                            if (params_base.lora_adapters[i].path == path) { found = (int) i; break; }
++                        }
++                        if (found < 0) {
++                            llama_adapter_lora_ptr l(llama_adapter_lora_init(const_cast<llama_model *>(llama_get_model(ctx_tgt)), path.c_str()));
++                            if (!l) {
++                                SRV_ERR("hot-add failed to load lora adapter: %s\n", path.c_str());
++                                continue;
++                            }
++                            char buf[1024];
++                            common_adapter_lora_info la{path, scale, "", "", l.get()};
++                            llama_adapter_meta_val_str(l.get(), "adapter.lora.task_name", buf, sizeof(buf));
++                            la.task_name = buf;
++                            llama_adapter_meta_val_str(l.get(), "adapter.lora.prompt_prefix", buf, sizeof(buf));
++                            la.prompt_prefix = buf;
++                            params_base.lora_adapters.push_back(la);
++                            hot_loras.push_back(std::move(l));
++                            found = (int) params_base.lora_adapters.size() - 1;
++                            SRV_INF("hot-added lora adapter id=%d path=%s scale=%.2f\n", found, path.c_str(), scale);
++                        }
++                        task.set_lora[found] = scale;
++                    }
++                    std::lock_guard<std::mutex> lk(hot_lora_mutex);
+                     auto new_loras = construct_lora_list(task.set_lora);
+                     // logging
+                     for (size_t i = 0; i < new_loras.size(); ++i) {
+@@ -5892,11 +5926,29 @@ void server_routes::init_routes() {
+             return res;
+         }
+ 
++        // entries with "id" keep the original semantics (rescale a pre-loaded adapter);
++        // entries with "path" vLLM-style HOT-ADD — carried to the server task loop,
++        // which owns params_base.lora_adapters and loads them single-threaded.
++        std::map<int, float> lora_config;
++        std::vector<std::pair<std::string, float>> hot_add;
++        for (const auto & entry : body) {
++            if (entry.contains("path")) {
++                hot_add.emplace_back(entry.at("path").get<std::string>(),
++                                     json_value(entry, "scale", 1.0f));
++            } else {
++                int id = json_value(entry, "id", -1);
++                if (id >= 0) {
++                    lora_config[id] = json_value(entry, "scale", 0.0f);
++                }
++            }
++        }
++
+         auto & rd = res->rd;
+         {
+             server_task task(SERVER_TASK_TYPE_SET_LORA);
+             task.id = rd.get_new_id();
+-            task.set_lora = parse_lora_request(body);
++            task.set_lora = lora_config;
++            task.hot_add_lora = std::move(hot_add);
+             rd.post_task(std::move(task));
+         }
+ 
+diff --git a/tools/server/server-task.h b/tools/server/server-task.h
+index 50926ec..ca34597 100644
+--- a/tools/server/server-task.h
++++ b/tools/server/server-task.h
+@@ -208,6 +208,7 @@ struct server_task {
+ 
+     // used by SERVER_TASK_TYPE_SET_LORA
+     std::map<int, float> set_lora; // mapping adapter ID -> scale
++    std::vector<std::pair<std::string, float>> hot_add_lora; // vLLM-style runtime load: (path, scale)
+ 
+     server_task() = default;
+ 

@@ -106,7 +106,14 @@ A Qwen3-4B LoRA law expert (civil + criminal) was trained on an external RTX 309
 `/lora-adapters`. Verified behavior on a deliberately hard boundary set (blood-alcohol
 72/65/81 mg edges, sober accidents, hit-and-run + refusal): adapter OFF 4/6 with p=0.25
 (the base guessing) → runtime `POST /lora-adapters [{"id":0,"scale":1.0}]` → **6/6 with
-p≥0.99**, same server PID throughout (zero restarts). Interface limits measured: only
+p≥0.99**, same server PID throughout (zero restarts). **Update — vLLM-style hot-add, ported to our Iluvarian llama.cpp**: `patches/vllm-style-hot-add-lora.patch`
+makes `POST /lora-adapters` accept `{"path": ..., "scale": ...}` entries that load a NEW
+adapter file into the RUNNING server (task-loop-side load, single-threaded, race-free).
+Measured: bare server 4/6 → one POST → 6/6, same PID. Per-request routing via the
+request-level `"lora"` field also verified (global off + request-level on → correct).
+Previous limits about pre-loaded-only adapters no longer apply to this build.
+
+Interface limits measured: only
 pre-loaded adapters can be managed at runtime (unknown ids silently no-op), and
 `--lora-init-without-apply` does not hold on this build. Artifacts in `lora/`.
 
